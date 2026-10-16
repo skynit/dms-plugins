@@ -38,7 +38,7 @@
 
 ## 安装与放置
 
-运行环境：Linux 上的 **DMS 1.6.1 或更新版本**、DMS 使用的 Quickshell/Qt 6，以及带 `sqlite3` 标准库的 **Python 3**。
+运行环境：Linux 上的 **DMS 1.6.1 或更新版本**、DMS 使用的 Quickshell/Qt 6、随插件分发的词典和纯 Go 查询程序；运行时不需要 Python 或 cgo。源码构建时需要 Go，重新生成词典时才需要 Python 3。
 
 本机源码位于：
 
@@ -60,8 +60,8 @@
 cd /path/to/dms-plugins/LocalTranslate
 plugin_dir="${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/plugins/localTranslate"
 mkdir -p "$plugin_dir"
-cp -a LocalTranslate.qml TranslatePopout.qml TranslateSettings.qml Lookup.qml \
-  lookup.py build_dictionary.py plugin.json data "$plugin_dir/"
+cp -a LocalTranslate.qml TranslatePopout.qml TranslateSettings.qml Lookup.qml plugin.json data "$plugin_dir/"
+GOAMD64=v1 CGO_ENABLED=0 go build -o "$plugin_dir/translate-lookup" .
 dms ipc call plugin-scan scan
 ```
 
@@ -113,7 +113,7 @@ dms ipc call plugins list
 
 ## 离线与隐私
 
-运行时只读随插件分发的 SQLite 字典，不发送网络请求。查询通过 JSON 标准输入传给固定的 `python3 lookup.py`，用户文本不作为 shell 命令执行。
+运行时只读随插件分发的 SQLite 字典，不发送网络请求。查询通过 JSON 标准输入传给固定的 `translate-lookup` Go 程序，用户文本不作为 shell 命令执行。
 
 插件只保存方向、显示开关等设置，不将查询历史写入文件。复制和粘贴仅由用户操作触发，不轮询剪贴板；系统或其他应用自行提供的剪贴板历史不受本插件控制。
 
@@ -126,26 +126,27 @@ LocalTranslate/
 ├── TranslatePopout.qml      # 输入、方向和结果弹窗
 ├── TranslateSettings.qml    # 设置页
 ├── Lookup.qml               # 本地进程、取消及超时处理
-├── lookup.py                # 离线查询与 JSON 协议
-├── build_dictionary.py      # 从随附原始词库建立索引
+├── main.go / main_test.go   # 运行时查询与当前包测试
+├── lookup.py                # 只供构建词典及旧查询对照，不随运行版安装
+├── build_dictionary.py      # 构建时从随附原始词库建立索引
 ├── data/
 │   ├── cedict.txt.gz         # 原始 CC-CEDICT 快照
 │   ├── dictionary.sqlite3   # 可直接使用的双向索引
 │   ├── manifest.json        # 版本、数量与 SHA-256
 │   ├── NOTICE.md            # 词库署名与派生说明
 │   └── CC-BY-SA-4.0.txt     # 词库完整许可
-├── tests/test_lookup.py     # 当前插件的测试
+├── tests/test_lookup.py     # 词典构建器与旧查询对照测试（需 Python）
 └── docs/images/             # 真实 QML 界面截图
 ```
 
-原始压缩词库约 3.8 MiB，索引约 23 MiB。运行时不需要解压、重建或安装第三方 Python 包。
+原始压缩词库约 3.8 MiB，索引约 23 MiB。运行时不需要解压、重建或 Python。
 
 ## 开发与验证
 
 仅运行此插件的测试：
 
 ```bash
-python3 -m unittest discover -s tests -v
+CGO_ENABLED=0 go test ./...
 ```
 
 测试覆盖双向查询、简繁匹配、短语、输入归一化、方向强制选择、非法与超长请求、缺失/损坏词库、建议词、结果上限、原始数据校验，以及 JSON 命令行协议。
@@ -153,9 +154,7 @@ python3 -m unittest discover -s tests -v
 可直接调用查询程序：
 
 ```bash
-python3 lookup.py <<'JSON'
-{"text":"computer","direction":"auto"}
-JSON
+printf '%s\n' '{"text":"computer","direction":"auto"}' | "${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/plugins/localTranslate/translate-lookup"
 ```
 
 响应 `status` 为 `idle`、`ready`、`empty` 或 `error`；`entries` 是精确匹配结果，`suggestions` 是建议列表。`direction` 的 `zh` 表示中译英，`en` 表示英译中。查询时使用只读数据库连接。

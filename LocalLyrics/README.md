@@ -67,7 +67,7 @@
 
 ## 环境、安装与更新
 
-运行需要 Linux、**DMS 1.6.1 或更新版本**、DMS 对应的 Quickshell/Qt 6、**Python 3** 和 **FFmpeg（ffprobe）**。本机依赖已具备，不需要 pip 包、API Key 或联网服务。
+运行需要 Linux、**DMS 1.6.1 或更新版本**、DMS 对应的 Quickshell/Qt 6、随插件分发的纯 Go 辅助程序和 **FFmpeg（ffprobe）**；运行时不需要 Python 或 cgo。编译辅助程序需要 Go。
 
 源码：`/home/skynit/workspace/dms-plugins/LocalLyrics`，由 `dms-plugins` 仓库统一管理。
 
@@ -80,7 +80,8 @@ cd /path/to/dms-plugins/LocalLyrics
 plugin_dir="${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/plugins/localLyrics"
 mkdir -p "$plugin_dir"
 cp -a LocalLyrics.qml LyricsSource.qml LyricsPopout.qml LyricsSettings.qml \
-  Timeline.js lyrics.py plugin.json README.md docs "$plugin_dir/"
+  Timeline.js plugin.json README.md docs "$plugin_dir/"
+GOAMD64=v1 CGO_ENABLED=0 go build -o "$plugin_dir/lyrics-helper" .
 dms ipc call plugin-scan scan
 ```
 
@@ -104,20 +105,21 @@ termusic 媒体库路径遵循 `XDG_CONFIG_HOME`，默认是 `~/.config/termusic
 | `LyricsPopout.qml` | 全文、高亮、状态和重新读取 |
 | `LyricsSettings.qml` | 单双行、宽度、时间偏移与复原 |
 | `Timeline.js` | 时间匹配与进度格式化 |
-| `lyrics.py` | 本地音频定位、ffprobe 标签读取、歌词解析 |
-| `tests/test_lyrics.py` | 当前插件的测试 |
+| `main.go` | 本地音频定位、ffprobe 标签读取、歌词解析与 JSON 协议 |
+| `main_test.go` | Go 运行时的当前包测试 |
+| `lyrics.py` / `tests/test_lyrics.py` | 原实现与对照测试，只在开发时使用 |
 
-Python 只用标准库。查询通过 JSON 标准输入传递，不把歌名拼接为 shell 命令。ffprobe 只允许本地文件协议；插件不联网，不改写音频文件、媒体库或播放器状态，也不收集播放历史或访问剪贴板。
+Go 程序以 `CGO_ENABLED=0` 编译。查询通过 JSON 标准输入传递，不把歌名拼接为 shell 命令。ffprobe 只允许本地文件协议；插件不联网，不改写音频文件、媒体库或播放器状态，也不收集播放历史或访问剪贴板。
 
 按歌曲变化读取一次标签；播放中每 100ms 读取 Quickshell 提供的进度，精度取决于播放器。旧进程被取消，旧结果不会覆盖新歌曲。
 
 运行当前插件测试：
 
 ```bash
-python3 -m unittest discover -s tests -v
+CGO_ENABLED=0 go test ./...
 ```
 
-17 项测试覆盖实际 FLAC/MP3/M4A/Ogg 标签、纯文本和无歌词、termusic 唯一匹配与歧义、远程地址拒绝、读取失败、大小限制、时间格式、偏移和跳转。测试额外使用 FFmpeg 生成短静音文件、Node.js 验证与 QML 共用的时间匹配逻辑；运行插件只需 Python 3 与 ffprobe。
+Go 测试覆盖实际 FLAC/MP3/M4A/Ogg 标签、纯文本和无歌词、termusic 唯一匹配与歧义、远程地址拒绝、时间格式和偏移。测试使用 FFmpeg 生成短静音文件；旧 Python 测试可用于构建阶段的对照验证，运行插件只需 Go 编译产物与 ffprobe。
 
 本机还检查了真实 termusic 内嵌歌词读取与进度匹配，以及 DMS 实际组件的偏移复原、单双行、无图标、自动隐藏和零宽度收起。对测试播放器只进行组件内模拟，没有控制实际播放器。
 

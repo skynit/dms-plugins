@@ -57,7 +57,7 @@ Item {
     }
     property int revision: 0
     property var worker: null
-    readonly property string scriptPath: decodeURIComponent(Qt.resolvedUrl("lyrics.py").toString().replace(/^file:\/\//, ""))
+    readonly property string helperPath: decodeURIComponent(Qt.resolvedUrl("lyrics-helper").toString().replace(/^file:\/\//, ""))
 
     function readPosition() {
         position = player?.positionSupported && Number.isFinite(player.position) ? player.position : -1;
@@ -153,7 +153,7 @@ Item {
                 interval: 10000
                 onTriggered: process.fail("读取超时，请检查音频文件后重试。")
             }
-            command: ["python3", root.scriptPath]
+            command: [root.helperPath]
             stdinEnabled: true
             stdout: StdioCollector {}
             stderr: StdioCollector {}

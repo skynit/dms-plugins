@@ -8,6 +8,7 @@
 | **LocalTranslate** | 内置 CC-CEDICT 词库，中文与英文双向离线查词；显示简体中文，支持词条和短语 | [安装、使用与词库许可](LocalTranslate/README.md) |
 | **LocalLyrics** | 读取本地音乐文件的内嵌歌词，跟随播放进度显示；支持单双行、时间偏移及复原，无音乐时隐藏 | [安装、歌词来源与播放器支持](LocalLyrics/README.md) |
 | **CachyosAgents** | Claude Code / Codex / OpenCode 的 token 与费用统计，本机采集不联网；支持今天/近 7 天/累计、模型明细与额度条 | [安装、数据来源与开发验证](CachyosAgents/README.md) |
+| **PhoneConnect** | 安卓无线调试配对、扫描与 scrcpy Wayland 投屏；记住设备后一键连接 | [安装与使用](PhoneConnect/README.md) |
 
 ## 预览
 
@@ -50,6 +51,7 @@ cd LocalStatus
 | `LocalTranslate/` | `~/.config/DankMaterialShell/plugins/localTranslate` | `localTranslate` |
 | `LocalLyrics/` | `~/.config/DankMaterialShell/plugins/localLyrics` | `localLyrics` |
 | `CachyosAgents/` | `~/.config/DankMaterialShell/plugins/CachyosAgents` | `cachyosAgents` |
+| `PhoneConnect/` | `~/.config/DankMaterialShell/plugins/PhoneConnect` | `phoneConnect` |
 
 安装步骤支持通过 `XDG_CONFIG_HOME` 指定配置根目录。复制后运行 `dms ipc call plugin-scan scan`，等待发现插件，再在 DMS 设置中启用并自行选择状态栏位置。源码目录与安装目录是独立副本；更新源码后，需要重新复制对应插件的运行文件。
 

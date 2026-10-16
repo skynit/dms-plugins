@@ -10,6 +10,6 @@
   "settings": "./TranslateSettings.qml",
   "icon": "translate",
   "requires_dms": ">=1.6.1",
-  "dependencies": ["python3"],
+  "dependencies": [],
   "permissions": ["settings_read", "settings_write", "process", "clipboard"]
 }

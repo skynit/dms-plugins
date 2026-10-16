@@ -10,6 +10,6 @@
   "settings": "./LyricsSettings.qml",
   "icon": "lyrics",
   "requires_dms": ">=1.6.1",
-  "dependencies": ["python3", "ffprobe"],
+  "dependencies": ["ffprobe"],
   "permissions": ["settings_read", "settings_write", "process"]
 }

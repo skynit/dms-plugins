@@ -11,7 +11,7 @@ Item {
     })
     property var worker: null
     property int revision: 0
-    readonly property string scriptPath: decodeURIComponent(Qt.resolvedUrl("lookup.py").toString().replace(/^file:\/\//, ""))
+    readonly property string helperPath: decodeURIComponent(Qt.resolvedUrl("translate-lookup").toString().replace(/^file:\/\//, ""))
 
     function clear() {
         revision++;
@@ -97,13 +97,13 @@ Item {
                 finish({
                     "status": "error",
                     "reason": "worker_failed",
-                    "message": "无法启动查词程序，请确认已安装 Python 3，或重新安装插件后重试。",
+                    "message": "无法启动查词程序，请重新构建并安装插件后重试。",
                     "entries": [],
                     "suggestions": []
                 });
             }
 
-            command: ["python3", root.scriptPath]
+            command: [root.helperPath]
             stdinEnabled: true
             onStarted: {
                 write(input);
