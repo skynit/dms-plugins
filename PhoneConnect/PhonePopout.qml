@@ -109,8 +109,10 @@ Item {
             if (action === "pair" || action === "connect" || action === "reconnect") {
                 root.host = data.host;
                 root.port = data.port;
-                if (action === "pair" && data.paired)
+                if (action === "pair" && data.paired) {
                     pairingCode.text = "";
+                    root.pairPort = "";
+                }
             }
             if (action === "forget") {
                 root.host = "";
@@ -205,7 +207,7 @@ Item {
                 }
                 StyledText {
                     width: parent.width
-                    text: "打开手机「无线调试 → 使用配对码配对设备」。扫描只有一个结果时，只需输入配对码；也可填写配对 IP，端口选填（未发现时需填写）。"
+                    text: "打开并保持手机「无线调试 → 使用配对码配对设备」页面。扫描只有一个结果时，只需输入当前配对码；提交时会重新查找配对端口。扫描失败时可手填该页面的 IP 和端口。"
                     font.pixelSize: 12
                     color: Theme.surfaceVariantText
                     wrapMode: Text.WordWrap

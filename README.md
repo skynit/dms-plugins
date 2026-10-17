@@ -92,14 +92,14 @@ dms ipc call plugins reload phoneConnect
 | LocalTranslate | `1.6.1` | 构建后的 `translate-lookup` 和随仓库提供的 SQLite 词典；SQLite 是保存词条及查询索引的本地数据库 |
 | LocalLyrics | `1.6.1` | 构建后的 `lyrics-helper` 和 FFmpeg 的 `ffprobe`，后者负责读取音频标签 |
 | CachyosAgents | `1.5.3` | `jq`、`python3`，以及 CachyOS 安装器提供的本机用量采集程序；详见插件 README |
-| PhoneConnect | `1.5.3` | 构建后的 `phone-connect`、`adb` 和 `scrcpy` |
+| PhoneConnect | `1.5.3` | 构建后的 `phone-connect`、`adb`、`scrcpy`、`avahi-browse`，以及运行中的 `avahi-daemon` |
 | Focus | `1.6.2` | 构建后的 `focus-helper`、`niri` 和 `dms`；当前按 niri `26.04` 的接口实现 |
 
 - **LocalStatus** 展示即时状态，数据缺失或采样过期时保留具体原因，不将缺失数据显示成零。当前不包含历史曲线、网络速率或温度监控。
 - **LocalTranslate** 只查询已收录的中英文词条和短语，不执行任意整句翻译。运行时不需要 Python；重新构建词典时才使用 Python 工具。
 - **LocalLyrics** 通过 MPRIS 获取播放器状态。MPRIS 是播放器向桌面公开曲目、音频地址和进度的接口，由播放器提供，插件据此读取音频内嵌歌词；不搜索在线歌词或读取外置 LRC。缺少音频地址的 termusic 可通过本地媒体库匹配文件。
 - **CachyosAgents** 读取本机采集结果，缺失数据明确显示为未采集或无数据。采集程序由 CachyOS 安装器配置，插件自身不包含所有工具的采集实现；单独复制插件不能替代采集环境。
-- **PhoneConnect** 使用 ADB（Android 调试桥，由电脑上的 `adb` 与手机建立调试连接）传输命令和文件，再使用 `scrcpy` 创建投屏窗口。ADB 已连接与投屏已启动是两个状态；已有连接时直接投屏，断线后才尝试扫描、重连。无线连接需要手机开启无线调试，并与电脑处于可互通的局域网。文件推送目标为手机的 `/sdcard/Download/`。
+- **PhoneConnect** 使用 ADB（Android 调试桥，由电脑上的 `adb` 与手机建立调试连接）传输命令和文件，再使用 `scrcpy` 创建投屏窗口。ADB 已连接与投屏已启动是两个状态；已有连接时直接投屏，断线后才尝试扫描、重连。无线连接需要手机开启无线调试，并与电脑处于可互通的局域网；Avahi 负责发现手机当前的配对端口和连接端口，配对与连接失败分别显示原因。文件推送目标为手机的 `/sdcard/Download/`。
 - **Focus** 通过临时 niri 配置隔离其他应用的新窗口，并在焦点变化后请求切回原窗口，不修改用户的 niri 主配置。焦点切回可能短暂可见，部分系统浮层及紧急通知仍可能出现；退出时不会自动搬回专用工作区中的窗口，具体限制见插件 README。
 
 ## 开发验证

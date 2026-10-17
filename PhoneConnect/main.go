@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -25,7 +24,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/creack/pty"
-	"github.com/hashicorp/mdns"
 )
 
 type device struct {
@@ -127,49 +125,74 @@ func run(timeout time.Duration, input string, args ...string) result {
 	return result{Text: stdout.String(), Err: stderr.String()}
 }
 
-func serviceDevice(service string, entry *mdns.ServiceEntry) (device, bool) {
-	if entry == nil || entry.AddrV4 == nil || entry.Port < 1 || !strings.HasSuffix(entry.Name, "."+service+".local.") {
-		return device{}, false
-	}
-	host, port := entry.AddrV4.String(), strconv.Itoa(entry.Port)
-	if _, err := address(host, port); err != nil {
-		return device{}, false
-	}
-	name := strings.TrimSuffix(entry.Name, "."+service+".local.")
-	label := name
-	for _, field := range entry.InfoFields {
-		if value, ok := strings.CutPrefix(field, "name="); ok {
-			label = value
-			break
+// Avahi 的可解析输出用十进制转义服务名中的空格、分号等字节。
+var avahiEscape = regexp.MustCompile(`\\([0-9]{3}|.)`)
+var avahiName = regexp.MustCompile(`"name=((?:\\.|[^"\\])*)"`)
+
+func unescape(value string) string {
+	return avahiEscape.ReplaceAllStringFunc(value, func(part string) string {
+		if len(part) == 4 {
+			if n, err := strconv.ParseUint(part[1:], 10, 8); err == nil {
+				return string([]byte{byte(n)})
+			}
 		}
-	}
-	return device{Host: host, Port: port, Name: label, Serial: name + "." + service}, true
+		return part[1:]
+	})
 }
 
-func discover(service string) []device {
-	entries := make(chan *mdns.ServiceEntry, 32)
+func serviceDevices(service, output string) []device {
+	entries := make(map[string]device)
+	var order []string
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.SplitN(strings.TrimSpace(line), ";", 10)
+		if len(fields) < 6 || fields[4] != service || fields[5] != "local" {
+			continue
+		}
+		key := strings.Join(fields[1:6], ";")
+		if fields[0] == "-" {
+			delete(entries, key)
+			continue
+		}
+		if fields[0] != "=" || len(fields) < 9 {
+			continue
+		}
+		host, port := fields[7], fields[8]
+		ip := net.ParseIP(host)
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		if _, err := address(host, port); err != nil {
+			continue
+		}
+		name := unescape(fields[3])
+		label := name
+		if len(fields) == 10 {
+			if match := avahiName.FindStringSubmatch(fields[9]); len(match) > 1 {
+				label = unescape(match[1])
+			}
+		}
+		if _, exists := entries[key]; !exists {
+			order = append(order, key)
+		}
+		entries[key] = device{Host: host, Port: port, Name: label, Serial: name + "." + service}
+	}
 	found := []device{}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for entry := range entries {
-			item, valid := serviceDevice(service, entry)
-			if !valid {
-				continue
-			}
-			if slices.ContainsFunc(found, func(other device) bool { return other.Host == item.Host && other.Port == item.Port }) {
-				continue
-			}
+	for _, key := range order {
+		item, exists := entries[key]
+		if exists && !slices.ContainsFunc(found, func(other device) bool { return other.Host == item.Host && other.Port == item.Port }) {
 			found = append(found, item)
 		}
-	}()
-	_ = mdns.QueryContext(context.Background(), &mdns.QueryParam{
-		Service: service, Domain: "local", Timeout: 4 * time.Second,
-		Entries: entries, DisableIPv6: true, Logger: log.New(io.Discard, "", 0),
-	})
-	close(entries)
-	<-done
+	}
 	return found
+}
+
+func discover(service string) ([]device, error) {
+	res := execute(6*time.Second, "", "avahi-browse", "-rtpk", service)
+	found := serviceDevices(service, res.Text)
+	if res.Code != 0 || strings.TrimSpace(res.Err) != "" {
+		return found, fmt.Errorf("Avahi 扫描失败，请检查 avahi-browse 是否已安装、avahi-daemon 是否运行：%s", first(res.Err, res.Text, "扫描未完成"))
+	}
+	return found, nil
 }
 
 func devices() ([]string, error) {
@@ -278,7 +301,8 @@ func known() *device {
 	}
 	if len(wireless) > 0 {
 		seen := make(map[string]bool)
-		for _, item := range browse("_adb-tls-connect._tcp") {
+		services, _ := browse("_adb-tls-connect._tcp")
+		for _, item := range services {
 			if slices.Contains(wireless, item.Serial) {
 				found = append(found, item)
 				seen[item.Serial] = true
@@ -541,7 +565,7 @@ func activeDevice() (*device, error) {
 	addresses := slices.ContainsFunc(usable, func(item device) bool { return item.Host != "" })
 	if wireless && addresses {
 		// 同一台手机可能同时以地址和无线服务名称出现在 ADB 列表中。
-		services := browse("_adb-tls-connect._tcp")
+		services, _ := browse("_adb-tls-connect._tcp")
 		unique := make(map[string]device)
 		for _, item := range usable {
 			resolved := resolve(item, services)
@@ -740,7 +764,11 @@ func connect(r request) (map[string]any, error) {
 	host, port := strings.TrimSpace(r.Host), strings.TrimSpace(r.Port)
 	if port == "" {
 		var found []device
-		for _, item := range browse("_adb-tls-connect._tcp") {
+		services, err := browse("_adb-tls-connect._tcp")
+		if err != nil {
+			return nil, fmt.Errorf("无法查找连接端口：%w；可手填无线调试主页的连接地址", err)
+		}
+		for _, item := range services {
 			if item.Host == host {
 				found = append(found, item)
 			}
@@ -756,88 +784,158 @@ func connect(r request) (map[string]any, error) {
 	}
 	res := execute(12*time.Second, "", "adb", "connect", serial)
 	serials, checkErr := devices()
-	if res.Code != 0 || checkErr != nil || !slices.Contains(serials, serial) {
-		return nil, errors.New(first(res.Err, res.Text, "手机未连接，请检查无线调试与同一局域网"))
+	if checkErr != nil {
+		return nil, fmt.Errorf("无法确认 ADB 连接状态（%s）：%w", serial, checkErr)
+	}
+	if res.Code != 0 || !slices.Contains(serials, serial) {
+		return nil, fmt.Errorf("ADB 连接失败（%s）：%s；请核对无线调试主页的连接端口", serial, first(res.Err, res.Text, "手机未连接，请检查无线调试与同一局域网"))
 	}
 	return show(device{Host: host, Port: port, Serial: serial}, r.Options)
 }
 
 func show(value device, opt options) (map[string]any, error) {
-	path, err := start(value.Serial, opt)
-	if err != nil {
-		return nil, err
-	}
+	path, launchErr := start(value.Serial, opt)
 	// 先启动已有连接的投屏，再用扫描结果补充地址，避免扫描失败阻断投屏。
 	if value.Host != "" || strings.HasSuffix(value.Serial, "._adb-tls-connect._tcp") {
-		value = resolve(value, browse("_adb-tls-connect._tcp"))
+		services, _ := browse("_adb-tls-connect._tcp")
+		value = resolve(value, services)
 	}
 	if err := save(value); err != nil {
 		return nil, err
+	}
+	response := map[string]any{"host": value.Host, "port": value.Port, "saved": value, "connected": true}
+	if launchErr != nil {
+		return response, fmt.Errorf("ADB 已连接，但投屏启动失败：%w", launchErr)
 	}
 	message := "已启动 scrcpy 投屏"
 	if path != "" {
 		message += "，录制到 " + path
 	}
-	return map[string]any{"message": message, "host": value.Host, "port": value.Port, "saved": value}, nil
+	response["message"] = message
+	return response, nil
+}
+
+func pairTarget(host, port string) (device, error) {
+	if host != "" || port != "" {
+		if _, err := address(host, first(port, "1")); err != nil {
+			return device{}, err
+		}
+	}
+	services, err := browse("_adb-tls-pairing._tcp")
+	// 手填完整地址时仍可在网络不支持服务发现的情况下配对。
+	if err != nil {
+		if host != "" && port != "" {
+			return device{Host: host, Port: port}, nil
+		}
+		return device{}, fmt.Errorf("无法查找配对端口：%w；可手填手机配对码页面的地址和端口", err)
+	}
+	var found []device
+	for _, item := range services {
+		if host == "" || item.Host == host {
+			found = append(found, item)
+		}
+	}
+	if len(found) == 1 {
+		return found[0], nil
+	}
+	if len(found) > 1 {
+		for _, item := range found {
+			if host != "" && port != "" && item.Port == port {
+				return item, nil
+			}
+		}
+		return device{}, errors.New("未找到唯一的配对设备或配对端口，请重新扫描并选择手机当前配对码页面的地址")
+	}
+	if host != "" && port != "" {
+		return device{Host: host, Port: port}, nil
+	}
+	return device{}, errors.New("未找到唯一的配对设备或配对端口，请保持手机配对码页面打开并扫描，或填写该页面的地址和端口")
 }
 
 func pair(r request) (map[string]any, error) {
-	if ok, _ := regexp.MatchString(`^[0-9]{6}$`, strings.TrimSpace(r.Code)); !ok {
+	code := strings.TrimSpace(r.Code)
+	if ok, _ := regexp.MatchString(`^[0-9]{6}$`, code); !ok {
 		return nil, errors.New("请输入手机显示的 6 位配对码")
 	}
-	host, port := strings.TrimSpace(r.Host), strings.TrimSpace(r.Port)
-	if host == "" && port == "" {
-		found := browse("_adb-tls-pairing._tcp")
-		if len(found) != 1 {
-			return nil, errors.New("未找到唯一的配对设备；请打开手机配对码页面并扫描，或填写配对地址和端口")
-		}
-		host, port = found[0].Host, found[0].Port
-	} else if port == "" {
-		var found []device
-		for _, item := range browse("_adb-tls-pairing._tcp") {
-			if item.Host == host {
-				found = append(found, item)
-			}
-		}
-		if len(found) != 1 {
-			return nil, errors.New("未发现唯一的配对端口，请填写手机配对码页面显示的配对端口")
-		}
-		port = found[0].Port
-	}
-	serial, err := address(host, port)
+	target, err := pairTarget(strings.TrimSpace(r.Host), strings.TrimSpace(r.Port))
 	if err != nil {
 		return nil, err
 	}
-	res := execute(20*time.Second, r.Code+"\n", "adb", "pair", serial)
+	serial := target.Host + ":" + target.Port
+	res := execute(20*time.Second, code+"\n", "adb", "pair", serial)
 	if res.Code != 0 || !strings.Contains(res.Text, "Successfully paired") {
-		return nil, errors.New(first(res.Err, res.Text, "配对失败，请检查地址和配对码"))
+		// 只对端口拒绝连接且发现同一 IP 的新端口进行一次重试，不重试错误配对码。
+		if strings.Contains(strings.ToLower(res.Err+res.Text), "connection refused") {
+			current, lookupErr := pairTarget(target.Host, target.Port)
+			if lookupErr == nil && current.Port != target.Port {
+				target = current
+				serial = target.Host + ":" + target.Port
+				res = execute(20*time.Second, code+"\n", "adb", "pair", serial)
+			}
+		}
 	}
-	connectPort := ""
-	for range 3 {
+	if res.Code != 0 || !strings.Contains(res.Text, "Successfully paired") {
+		detail := strings.ReplaceAll(first(res.Err, res.Text, "未完成配对"), code, "[配对码已隐藏]")
+		if strings.Contains(strings.ToLower(res.Err+res.Text), "connection refused") {
+			return nil, fmt.Errorf("配对端口 %s 拒绝连接，请重新打开手机配对码页面，刷新地址并输入当前配对码：%s", serial, detail)
+		}
+		return nil, fmt.Errorf("配对失败（%s）：%s；请保持配对码页面打开，核对当前地址和配对码", serial, detail)
+	}
+	host := target.Host
+	var connectErr error
+	for attempt := range 3 {
+		// 仅复用刚配对手机的地址，不因另一台手机在线就跳过目标发现。
+		serials, _ := devices()
+		var active []device
+		for _, serial := range serials {
+			if currentHost, port, err := net.SplitHostPort(serial); err == nil && currentHost == host {
+				active = append(active, device{Host: host, Port: port, Serial: serial})
+			}
+		}
+		if len(active) == 1 {
+			value, err := show(active[0], r.Options)
+			if value == nil {
+				value = map[string]any{"host": host, "port": active[0].Port}
+			}
+			value["paired"] = true
+			return value, err
+		}
+		services, err := browse("_adb-tls-connect._tcp")
+		connectErr = err
+		if err != nil {
+			break
+		}
 		var found []device
-		for _, item := range browse("_adb-tls-connect._tcp") {
+		for _, item := range services {
 			if item.Host == host {
 				found = append(found, item)
 			}
 		}
 		if len(found) == 1 {
-			connectPort = found[0].Port
+			r.Host, r.Port = host, found[0].Port
+			value, err := connect(r)
+			if value == nil {
+				value = map[string]any{"host": host, "port": r.Port}
+			}
+			value["paired"] = true
+			if err != nil {
+				return value, fmt.Errorf("配对成功，%w", err)
+			}
+			return value, nil
+		}
+		if len(found) > 1 {
+			connectErr = errors.New("发现多个连接端口，请选择手机无线调试主页的当前连接地址")
 			break
 		}
-		pause(time.Second)
+		if attempt < 2 {
+			pause(time.Second)
+		}
 	}
-	if connectPort == "" {
-		return map[string]any{"message": "配对成功。未发现连接端口，请填写手机无线调试主页的地址和端口后连接。",
-			"host": host, "port": "", "paired": true}, nil
+	if connectErr == nil {
+		connectErr = errors.New("未发现连接端口")
 	}
-	r.Host, r.Port = host, connectPort
-	value, err := connect(r)
-	if err != nil {
-		return map[string]any{"message": "配对成功，但连接失败：" + err.Error() + "。可在无线调试主页查看连接端口后重试。",
-			"host": host, "port": connectPort, "paired": true}, nil
-	}
-	value["paired"] = true
-	return value, nil
+	return map[string]any{"host": host, "port": "", "paired": true},
+		fmt.Errorf("配对成功，但尚未连接：%w；请填写无线调试主页的连接地址，无需再次配对", connectErr)
 }
 
 func handle(action string, r request) (map[string]any, error) {
@@ -852,7 +950,19 @@ func handle(action string, r request) (map[string]any, error) {
 		}
 		return map[string]any{"saved": value}, nil
 	case "scan":
-		return map[string]any{"pairing": browse("_adb-tls-pairing._tcp"), "connections": browse("_adb-tls-connect._tcp"), "saved": read("device")}, nil
+		pairing, pairErr := browse("_adb-tls-pairing._tcp")
+		connections, connectErr := browse("_adb-tls-connect._tcp")
+		if pairErr != nil {
+			pairErr = fmt.Errorf("配对服务：%w", pairErr)
+		}
+		if connectErr != nil {
+			connectErr = fmt.Errorf("连接服务：%w", connectErr)
+		}
+		message := "扫描完成，请选择手机当前的配对或连接地址"
+		if len(pairing) == 0 && len(connections) == 0 {
+			message = "未发现手机，请打开无线调试；首次配对时保持配对码页面打开，也可手填当前地址"
+		}
+		return map[string]any{"pairing": pairing, "connections": connections, "saved": read("device"), "message": message}, errors.Join(pairErr, connectErr)
 	case "pair":
 		return pair(r)
 	case "connect":
@@ -871,7 +981,8 @@ func handle(action string, r request) (map[string]any, error) {
 		}
 		var found []device
 		var matching []device
-		for _, item := range browse("_adb-tls-connect._tcp") {
+		services, scanErr := browse("_adb-tls-connect._tcp")
+		for _, item := range services {
 			if value.Serial != "" && item.Serial == value.Serial {
 				matching = append(matching, item)
 			}
@@ -892,7 +1003,11 @@ func handle(action string, r request) (map[string]any, error) {
 			return nil, errors.New("手机当前未连接，请开启无线调试并扫描，或填写当前连接地址")
 		}
 		r.Host, r.Port = value.Host, value.Port
-		return connect(r)
+		response, err := connect(r)
+		if err != nil && scanErr != nil {
+			return response, errors.Join(err, scanErr)
+		}
+		return response, err
 	case "forget":
 		if value := read("device"); value != nil {
 			if err := write("ignored", *value); err != nil {
@@ -930,7 +1045,10 @@ func main() {
 		response, err = handle(action, r)
 	}
 	if err != nil {
-		response = map[string]any{"ok": false, "message": err.Error()}
+		if response == nil {
+			response = map[string]any{}
+		}
+		response["ok"], response["message"] = false, err.Error()
 	} else {
 		response["ok"] = true
 	}

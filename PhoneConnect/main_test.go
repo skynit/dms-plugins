@@ -3,15 +3,13 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"net"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/hashicorp/mdns"
 )
 
 func setup(t *testing.T) {
@@ -36,19 +34,229 @@ func TestAddress(t *testing.T) {
 	}
 }
 
-func TestServiceDevice(t *testing.T) {
-	service := "_adb-tls-connect._tcp"
-	item, valid := serviceDevice(service, &mdns.ServiceEntry{
-		Name: "adb-123._adb-tls-connect._tcp.local.", AddrV4: net.ParseIP("192.168.1.5"),
-		Port: 41234, InfoFields: []string{"name=My Phone"},
-	})
-	if !valid || item.Serial != "adb-123._adb-tls-connect._tcp" || item.Name != "My Phone" {
-		t.Fatalf("service = %#v, valid = %t", item, valid)
+func TestServiceDevices(t *testing.T) {
+	output := `+;wlan0;IPv4;adb-phone;_adb-tls-connect._tcp;local
+=;wlan0;IPv4;adb-phone;_adb-tls-connect._tcp;local;Android.local;192.168.1.5;41234;"name=My Phone"
+=;wlan0;IPv6;adb-phone;_adb-tls-connect._tcp;local;Android.local;192.168.1.5;41234;"name=My Phone"
+=;wlan0;IPv4;adb-old;_adb-tls-connect._tcp;local;Android.local;192.168.1.5;40000;
+-;wlan0;IPv4;adb-old;_adb-tls-connect._tcp;local
+=;wlan0;IPv4;adb-pair;_adb-tls-pairing._tcp;local;Android.local;192.168.1.5;32100;
+=;wlan0;IPv6;adb-v6;_adb-tls-connect._tcp;local;Android.local;fe80::1234;41234;
+=;wlan0;IPv4;bad-port;_adb-tls-connect._tcp;local;Android.local;192.168.1.6;70000;
+=;wlan0;IPv4;bad-ip;_adb-tls-connect._tcp;local;Android.local;192.168.1.999;40000;
+=;wlan0;IPv4;other-domain;_adb-tls-connect._tcp;example;Android.local;192.168.1.6;40000;
+=;wlan0;IPv4;adb\032other\059phone;_adb-tls-connect._tcp;local;Android.local;192.168.1.7;49999;"api=36" "name=Phone; two"
+malformed
+`
+	want := []device{
+		{Host: "192.168.1.5", Port: "41234", Name: "My Phone", Serial: "adb-phone._adb-tls-connect._tcp"},
+		{Host: "192.168.1.7", Port: "49999", Name: "Phone; two", Serial: "adb other;phone._adb-tls-connect._tcp"},
 	}
-	if _, valid = serviceDevice(service, &mdns.ServiceEntry{
-		Name: "Charlies-Laptop._companion-link._tcp.local.", AddrV4: net.ParseIP("192.168.1.6"), Port: 63500,
-	}); valid {
-		t.Fatal("accepted unrelated mDNS service")
+	if got := serviceDevices("_adb-tls-connect._tcp", output); !reflect.DeepEqual(got, want) {
+		t.Fatalf("services = %#v", got)
+	}
+}
+
+func TestDiscoverReportsFailures(t *testing.T) {
+	for _, sample := range []result{
+		{Code: 1, Err: "Daemon not running"},
+		{Code: 1, Err: "avahi-browse 不可用或等待超时"},
+		{Err: "Failed to resolve service: Timeout reached"},
+	} {
+		t.Run(sample.Err, func(t *testing.T) {
+			setup(t)
+			execute = func(limit time.Duration, input string, args ...string) result {
+				if limit > 6*time.Second || input != "" || !reflect.DeepEqual(args, []string{"avahi-browse", "-rtpk", "_adb-tls-pairing._tcp"}) {
+					t.Errorf("unexpected discovery invocation: %v, %q, %v", limit, input, args)
+				}
+				return sample
+			}
+			if _, err := discover("_adb-tls-pairing._tcp"); err == nil || !strings.Contains(err.Error(), sample.Err) {
+				t.Fatalf("lost Avahi failure: %v", err)
+			}
+		})
+	}
+}
+
+func TestPairTargetSelection(t *testing.T) {
+	for _, sample := range []struct {
+		name     string
+		host     string
+		port     string
+		services []device
+		scanErr  error
+		wantPort string
+	}{
+		{"manual without Avahi", "192.168.1.5", "32100", nil, errors.New("Avahi unavailable"), "32100"},
+		{"discovery required", "192.168.1.5", "", nil, errors.New("Avahi unavailable"), ""},
+		{"same IP multiple ports", "192.168.1.5", "32000", []device{{Host: "192.168.1.5", Port: "32100"}, {Host: "192.168.1.5", Port: "32200"}}, nil, ""},
+		{"explicit among multiple ports", "192.168.1.5", "32200", []device{{Host: "192.168.1.5", Port: "32100"}, {Host: "192.168.1.5", Port: "32200"}}, nil, "32200"},
+		{"do not select another phone", "192.168.1.5", "32100", []device{{Host: "192.168.1.6", Port: "32200"}}, nil, "32100"},
+		{"invalid manual port", "192.168.1.5", "70000", nil, nil, ""},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			setup(t)
+			browse = func(string) ([]device, error) { return sample.services, sample.scanErr }
+			target, err := pairTarget(sample.host, sample.port)
+			if sample.wantPort == "" {
+				if err == nil {
+					t.Fatalf("accepted ambiguous or invalid target: %#v", target)
+				}
+			} else if err != nil || target.Host != sample.host || target.Port != sample.wantPort {
+				t.Fatalf("target = %#v, %v", target, err)
+			}
+		})
+	}
+}
+
+func TestPairRetriesOnlyChangedRefusedPort(t *testing.T) {
+	for _, sample := range []struct {
+		name      string
+		failure   string
+		ports     []string
+		wantCalls int
+		success   bool
+	}{
+		{"changed port", "Connection refused", []string{"32100", "32200"}, 2, false},
+		{"successful retry", "Connection refused", []string{"32100", "32200"}, 2, true},
+		{"unchanged port", "Connection refused", []string{"32100", "32100"}, 1, false},
+		{"wrong code", "Wrong password 123456", []string{"32100", "32200"}, 1, false},
+		{"ambiguous new ports", "Connection refused", []string{"32100", "32200", "32300"}, 1, false},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			setup(t)
+			queries, calls := 0, 0
+			browse = func(service string) ([]device, error) {
+				if service != "_adb-tls-pairing._tcp" {
+					return nil, nil
+				}
+				queries++
+				ports := sample.ports[:1]
+				if queries > 1 {
+					ports = sample.ports[1:]
+				}
+				var found []device
+				for _, port := range ports {
+					found = append(found, device{Host: "192.168.1.5", Port: port})
+				}
+				return found, nil
+			}
+			execute = func(_ time.Duration, input string, args ...string) result {
+				if args[1] != "pair" {
+					return result{Text: "192.168.1.5:49999\tdevice\n"}
+				}
+				calls++
+				if args[2] != "192.168.1.5:"+sample.ports[calls-1] || input != "123456\n" {
+					t.Errorf("unexpected retry: %v", args)
+				}
+				if sample.success && calls == 2 {
+					return result{Text: "Successfully paired"}
+				}
+				return result{Code: 1, Err: sample.failure}
+			}
+			start = func(serial string, _ options) (string, error) {
+				if serial != "192.168.1.5:49999" {
+					t.Errorf("wrong target: %s", serial)
+				}
+				return "", nil
+			}
+			value, err := pair(request{Host: "192.168.1.5", Port: "32000", Code: "123456"})
+			if sample.success {
+				if err != nil || calls != sample.wantCalls || value["paired"] != true || value["connected"] != true {
+					t.Fatalf("retry did not recover: calls=%d, value=%v, error=%v", calls, value, err)
+				}
+				return
+			}
+			if err == nil || calls != sample.wantCalls || strings.Contains(err.Error(), "123456") {
+				t.Fatalf("calls=%d, error=%v", calls, err)
+			}
+		})
+	}
+}
+
+func TestPairReusesOnlyTargetAndKeepsLaunchFailure(t *testing.T) {
+	setup(t)
+	browse = func(string) ([]device, error) { return nil, errors.New("Avahi unavailable") }
+	execute = func(_ time.Duration, _ string, args ...string) result {
+		switch args[1] {
+		case "pair":
+			return result{Text: "Successfully paired"}
+		case "devices":
+			return result{Text: "192.168.1.6:41234\tdevice\n192.168.1.5:49999\tdevice\n"}
+		default:
+			t.Fatalf("unexpected adb command: %v", args)
+			return result{}
+		}
+	}
+	start = func(serial string, _ options) (string, error) {
+		if serial != "192.168.1.5:49999" {
+			t.Errorf("wrong phone: %s", serial)
+		}
+		return "", errors.New("scrcpy failed")
+	}
+	value, err := pair(request{Host: "192.168.1.5", Port: "32100", Code: "123456"})
+	if err == nil || !strings.Contains(err.Error(), "ADB 已连接，但投屏启动失败") || value["paired"] != true || value["connected"] != true || read("device").Port != "49999" {
+		t.Fatalf("lost pairing/connection facts on launch error: %v, %v", value, err)
+	}
+}
+
+func TestMainPreservesPartialResults(t *testing.T) {
+	for _, action := range []string{"scan", "pair"} {
+		t.Run(action, func(t *testing.T) {
+			setup(t)
+			browse = func(service string) ([]device, error) {
+				if service == "_adb-tls-pairing._tcp" {
+					return []device{{Host: "192.168.1.5", Port: "32100"}}, nil
+				}
+				return []device{}, errors.New("Avahi resolve failed")
+			}
+			execute = func(_ time.Duration, _ string, args ...string) result {
+				if args[1] == "pair" {
+					return result{Text: "Successfully paired"}
+				}
+				return result{}
+			}
+			input, err := os.CreateTemp(t.TempDir(), "request")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer input.Close()
+			if _, err = input.WriteString(`{"host":"192.168.1.5","port":"32100","code":"123456"}`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = input.Seek(0, 0); err != nil {
+				t.Fatal(err)
+			}
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.Close()
+			defer writer.Close()
+			oldIn, oldOut, oldArgs := os.Stdin, os.Stdout, os.Args
+			t.Cleanup(func() { os.Stdin, os.Stdout, os.Args = oldIn, oldOut, oldArgs })
+			os.Stdin, os.Stdout, os.Args = input, writer, []string{"phone-connect", action}
+			main()
+			writer.Close()
+			data, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var value map[string]any
+			if err = json.Unmarshal(data, &value); err != nil {
+				t.Fatal(err)
+			}
+			if value["ok"] != false || !strings.Contains(value["message"].(string), "Avahi resolve failed") {
+				t.Fatalf("lost error: %s", data)
+			}
+			if action == "scan" {
+				if len(value["pairing"].([]any)) != 1 || len(value["connections"].([]any)) != 0 {
+					t.Fatalf("lost partial scan: %s", data)
+				}
+			} else if value["paired"] != true || value["host"] != "192.168.1.5" || value["port"] != "" {
+				t.Fatalf("lost successful pairing: %s", data)
+			}
+		})
 	}
 }
 
@@ -92,8 +300,8 @@ func TestRecord(t *testing.T) {
 
 func TestStateAndForget(t *testing.T) {
 	setup(t)
-	browse = func(service string) []device {
-		return []device{{Host: "192.168.1.5", Port: "41234", Serial: "adb-123._adb-tls-connect._tcp"}}
+	browse = func(service string) ([]device, error) {
+		return []device{{Host: "192.168.1.5", Port: "41234", Serial: "adb-123._adb-tls-connect._tcp"}}, nil
 	}
 	execute = func(_ time.Duration, _ string, args ...string) result {
 		return result{Text: "192.168.1.5:41234\tdevice\nadb-123._adb-tls-connect._tcp\tdevice\n"}
@@ -127,11 +335,11 @@ func TestSeveralPhonesAreNotSaved(t *testing.T) {
 func TestConnectAndPair(t *testing.T) {
 	setup(t)
 	var calls []string
-	browse = func(service string) []device {
+	browse = func(service string) ([]device, error) {
 		if service == "_adb-tls-pairing._tcp" {
-			return []device{{Host: "192.168.1.5", Port: "32100"}}
+			return []device{{Host: "192.168.1.5", Port: "32100"}}, nil
 		}
-		return []device{{Host: "192.168.1.5", Port: "41234"}}
+		return []device{{Host: "192.168.1.5", Port: "41234"}}, nil
 	}
 	execute = func(_ time.Duration, input string, args ...string) result {
 		calls = append(calls, strings.Join(args, " ")+"|"+input)
@@ -139,6 +347,9 @@ func TestConnectAndPair(t *testing.T) {
 		case "pair":
 			return result{Text: "Successfully paired to 192.168.1.5:32100"}
 		case "devices":
+			if len(calls) == 2 {
+				return result{}
+			}
 			return result{Text: "192.168.1.5:41234\tdevice\n"}
 		default:
 			return result{Text: "connected to 192.168.1.5:41234"}
@@ -154,7 +365,7 @@ func TestConnectAndPair(t *testing.T) {
 	if err != nil || response["paired"] != true || response["port"] != "41234" {
 		t.Fatalf("pair = %v, %v", response, err)
 	}
-	if calls[0] != "adb pair 192.168.1.5:32100|123456\n" || calls[1] != "adb connect 192.168.1.5:41234|" {
+	if calls[0] != "adb pair 192.168.1.5:32100|123456\n" || calls[2] != "adb connect 192.168.1.5:41234|" {
 		t.Fatalf("adb call order or code transport: %#v", calls)
 	}
 	content, _ := os.ReadFile(file("device"))
@@ -213,7 +424,7 @@ func TestMissingPortsDoNotChangeState(t *testing.T) {
 	if err := save(device{Host: "192.168.1.5", Port: "41234"}); err != nil {
 		t.Fatal(err)
 	}
-	browse = func(string) []device { return nil }
+	browse = func(string) ([]device, error) { return nil, nil }
 	if _, err := connect(request{Host: "192.168.1.6"}); err == nil || !strings.Contains(err.Error(), "连接端口") {
 		t.Errorf("missing connect port = %v", err)
 	}
@@ -227,7 +438,7 @@ func TestMissingPortsDoNotChangeState(t *testing.T) {
 
 func TestPairWithoutConnectService(t *testing.T) {
 	setup(t)
-	browse = func(string) []device { return nil }
+	browse = func(string) ([]device, error) { return nil, nil }
 	execute = func(_ time.Duration, _ string, args ...string) result {
 		if args[1] == "pair" {
 			return result{Text: "Successfully paired to 192.168.1.5:32100"}
@@ -236,8 +447,44 @@ func TestPairWithoutConnectService(t *testing.T) {
 	}
 	pause = func(time.Duration) {}
 	value, err := pair(request{Host: "192.168.1.5", Port: "32100", Code: "123456"})
-	if err != nil || value["paired"] != true || value["port"] != "" || read("device") != nil {
+	if err == nil || !strings.Contains(err.Error(), "配对成功") || value["paired"] != true || value["port"] != "" || read("device") != nil {
 		t.Errorf("successful pairing without connect service = %v, %v", value, err)
+	}
+}
+
+func TestPairRefreshesPort(t *testing.T) {
+	setup(t)
+	browse = func(service string) ([]device, error) {
+		if service == "_adb-tls-pairing._tcp" {
+			return []device{{Host: "192.168.1.5", Port: "32200"}}, nil
+		}
+		return nil, nil
+	}
+	execute = func(_ time.Duration, input string, args ...string) result {
+		if args[1] == "pair" {
+			if args[2] != "192.168.1.5:32200" || input != "123456\n" {
+				t.Errorf("pair used stale endpoint or lost code: %v, %q", args, input)
+			}
+			return result{Text: "Successfully paired"}
+		}
+		return result{}
+	}
+	pause = func(time.Duration) {}
+	value, err := pair(request{Host: "192.168.1.5", Port: "32100", Code: "123456"})
+	if err == nil || !strings.Contains(err.Error(), "配对成功") || value["paired"] != true {
+		t.Fatalf("pair = %v, %v", value, err)
+	}
+}
+
+func TestPairRefusedReportsEndpoint(t *testing.T) {
+	setup(t)
+	browse = func(string) ([]device, error) { return nil, nil }
+	execute = func(_ time.Duration, _ string, args ...string) result {
+		return result{Code: 1, Err: "Connection refused"}
+	}
+	_, err := pair(request{Host: "192.168.1.5", Port: "32100", Code: "123456"})
+	if err == nil || !strings.Contains(err.Error(), "配对端口") || !strings.Contains(err.Error(), "192.168.1.5:32100") {
+		t.Fatalf("lost pairing failure stage and address: %v", err)
 	}
 }
 
@@ -246,7 +493,7 @@ func TestReconnectUsesNewPortAndOptions(t *testing.T) {
 	if err := save(device{Host: "192.168.1.5", Port: "41234"}); err != nil {
 		t.Fatal(err)
 	}
-	browse = func(string) []device { return []device{{Host: "192.168.1.5", Port: "49999"}} }
+	browse = func(string) ([]device, error) { return []device{{Host: "192.168.1.5", Port: "49999"}}, nil }
 	connected := false
 	execute = func(_ time.Duration, _ string, args ...string) result {
 		if args[1] == "devices" {
@@ -313,11 +560,11 @@ func TestReconnectUsesActivePhone(t *testing.T) {
 				}
 				return result{Text: sample.listing}
 			}
-			browse = func(string) []device {
+			browse = func(string) ([]device, error) {
 				if !started && !sample.aliases {
 					t.Error("discovery blocked launching the connected phone")
 				}
-				return sample.service
+				return sample.service, nil
 			}
 			start = func(serial string, opt options) (string, error) {
 				started = true
@@ -359,7 +606,7 @@ func TestReconnectRejectsAmbiguousActivePhones(t *testing.T) {
 				}
 				return result{Text: sample.listing}
 			}
-			browse = func(string) []device { return sample.service }
+			browse = func(string) ([]device, error) { return sample.service, nil }
 			start = func(string, options) (string, error) { t.Error("launched an ambiguous phone"); return "", nil }
 			if _, err := handle("reconnect", request{}); err == nil || !strings.Contains(err.Error(), "多台") {
 				t.Fatalf("ambiguous phones = %v", err)
@@ -378,8 +625,8 @@ func TestReconnectFindsSavedIdentityAtNewAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 	connected := false
-	browse = func(string) []device {
-		return []device{{Host: "192.168.1.6", Port: "49999", Serial: serial}}
+	browse = func(string) ([]device, error) {
+		return []device{{Host: "192.168.1.6", Port: "49999", Serial: serial}}, nil
 	}
 	execute = func(_ time.Duration, _ string, args ...string) result {
 		if args[1] == "devices" {
@@ -418,8 +665,8 @@ func TestStateUpdatesSavedAddress(t *testing.T) {
 	execute = func(_ time.Duration, _ string, _ ...string) result {
 		return result{Text: serial + "\tdevice\n"}
 	}
-	browse = func(string) []device {
-		return []device{{Host: "192.168.1.6", Port: "49999", Serial: serial}}
+	browse = func(string) ([]device, error) {
+		return []device{{Host: "192.168.1.6", Port: "49999", Serial: serial}}, nil
 	}
 	response, err := handle("state", request{})
 	if err != nil {
@@ -432,12 +679,12 @@ func TestStateUpdatesSavedAddress(t *testing.T) {
 
 func TestUnrecognizedPairingIsNotSaved(t *testing.T) {
 	setup(t)
-	browse = func(string) []device { return nil }
+	browse = func(string) ([]device, error) { return nil, nil }
 	if _, err := pair(request{Code: "123456"}); err == nil || !strings.Contains(err.Error(), "唯一") {
 		t.Errorf("accepted missing pairing service: %v", err)
 	}
-	browse = func(string) []device {
-		return []device{{Host: "192.168.1.5", Port: "32100"}, {Host: "192.168.1.6", Port: "32101"}}
+	browse = func(string) ([]device, error) {
+		return []device{{Host: "192.168.1.5", Port: "32100"}, {Host: "192.168.1.6", Port: "32101"}}, nil
 	}
 	if _, err := pair(request{Code: "123456"}); err == nil || !strings.Contains(err.Error(), "唯一") {
 		t.Errorf("accepted ambiguous pairing services: %v", err)

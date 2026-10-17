@@ -193,7 +193,7 @@ Item {
                         root.pairing = response.pairing;
                     if (response.connections !== undefined)
                         root.connections = response.connections;
-                    if (response.ok)
+                    if (response.ok || response.paired || response.connected)
                         root.result(action, response);
                 } catch (error) {
                     root.failed = true;
