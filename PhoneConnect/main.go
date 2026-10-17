@@ -202,9 +202,17 @@ func devices() ([]string, error) {
 	}
 	var serials []string
 	for _, line := range strings.Split(r.Text, "\n") {
-		parts := strings.Fields(line)
-		if len(parts) >= 2 && parts[1] == "device" {
-			serials = append(serials, parts[0])
+		serial, status, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if !ok {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			serial, status = fields[0], fields[1]
+		}
+		statusFields := strings.Fields(status)
+		if len(statusFields) > 0 && statusFields[0] == "device" {
+			serials = append(serials, serial)
 		}
 	}
 	return serials, nil

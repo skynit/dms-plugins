@@ -402,6 +402,7 @@ func TestStatusUsesActiveADBDevice(t *testing.T) {
 		want    bool
 	}{
 		{"192.168.1.5:41234\tdevice\n", true},
+		{"adb-phone (2)._adb-tls-connect._tcp\tdevice\n", true},
 		{"192.168.1.5:41234\toffline\n", false},
 		{"192.168.1.5:41234\tunauthorized\n", false},
 		{"emulator-5554\tdevice\n", false},
@@ -581,6 +582,40 @@ func TestReconnectUsesActivePhone(t *testing.T) {
 				t.Fatalf("active phone was not remembered: %#v", saved)
 			}
 		})
+	}
+}
+
+func TestReconnectUsesActiveDeviceWhenSavedPortIsStale(t *testing.T) {
+	setup(t)
+	const activeSerial = "adb-phone (2)._adb-tls-connect._tcp"
+	if err := save(device{
+		Host: "192.168.1.5", Port: "46851", Serial: "adb-phone._adb-tls-connect._tcp",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	browse = func(string) ([]device, error) {
+		return []device{{Host: "192.168.1.5", Port: "36639", Serial: activeSerial}}, nil
+	}
+	execute = func(_ time.Duration, _ string, args ...string) result {
+		if !reflect.DeepEqual(args, []string{"adb", "devices"}) {
+			t.Errorf("unexpected ADB command: %v", args)
+			return result{Code: 1}
+		}
+		return result{Text: "192.168.1.5:36639\tdevice\n" + activeSerial + "\tdevice\n"}
+	}
+	start = func(serial string, _ options) (string, error) {
+		if serial != activeSerial {
+			t.Errorf("started stale or wrong device: %q", serial)
+		}
+		return "", nil
+	}
+
+	response, err := handle("reconnect", request{})
+	if err != nil || response["port"] != "36639" {
+		t.Fatalf("reconnect = %v, %v", response, err)
+	}
+	if saved := read("device"); saved == nil || saved.Host != "192.168.1.5" || saved.Port != "36639" {
+		t.Fatalf("active endpoint was not saved: %#v", saved)
 	}
 }
 
