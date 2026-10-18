@@ -3,3 +3,7 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+.shots/
+.design-ref/
+Top/top-helper
+Top/helper/top-helper
