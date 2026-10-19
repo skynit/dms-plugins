@@ -10,7 +10,7 @@
 | **LocalTranslate** | 内置 CC-CEDICT 词库，中文与英文双向离线查词；显示简体中文，支持词条和短语 | [安装、使用与词库许可](LocalTranslate/README.md) |
 | **LocalLyrics** | 读取本地音乐文件的内嵌歌词，跟随播放进度显示；支持单双行、时间偏移及复原，无音乐时隐藏 | [安装、歌词来源与播放器支持](LocalLyrics/README.md) |
 | **CachyosAgents** | Claude Code / Codex / OpenCode / DSH 等 AI 编程工具的 token 用量与费用统计；token 是模型处理文本的计量单位。读取本机采集结果，支持今天/近 7 天/累计、模型明细、额度条和默认工具切换 | [安装、数据来源与开发验证](CachyosAgents/README.md) |
-| **PhoneConnect** | 安卓无线调试配对、设备扫描、Wayland 投屏和带进度的文件推送；优先复用已连接的手机，更新保存的设备地址 | [安装、投屏与文件推送](PhoneConnect/README.md) |
+| **连接（PhoneConnect）** | 手机无线配对、投屏和文件传输，以及电脑 RDP 远程桌面；可保存电脑地址、账号和显示选项 | [安装、手机与电脑连接](PhoneConnect/README.md) |
 | **Focus** | 保持当前 niri 窗口，将其他应用随后打开的新窗口移入专用工作区，暂停 DMS 通知弹窗；退出时恢复此前配置和通知状态 | [构建、安装与功能边界](Focus/README.md) |
 | **Top** | 仿 ftop 的悬浮系统面板：每核占用与频率、内存压力与可用/缓存、网络与磁盘速率、GPU 与显存、供电、温度、负载与运行时间，以及带 CPU/内存两列、可排序、可右键结束进程的应用列表；默认居中、仅热键呼出、点击面板外关闭 | [界面、安装与数据来源](Top/README.md) |
 
@@ -64,7 +64,7 @@ cd ~/workspace/dms-plugins
 cd ~/workspace/dms-plugins/PhoneConnect
 plugin_dir="${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/plugins/PhoneConnect"
 mkdir -p "$plugin_dir"
-cp plugin.json PhoneConnect.qml PhonePopout.qml PhoneOptions.qml PhoneSource.qml "$plugin_dir/"
+cp plugin.json PhoneConnect.qml PhonePopout.qml PhoneOptions.qml PhoneSource.qml ComputerConnect.qml ComputerSource.qml "$plugin_dir/"
 GOAMD64=v1 CGO_ENABLED=0 go build -o "$plugin_dir/phone-connect" .
 dms ipc call plugin-scan scan
 dms ipc call plugins enable phoneConnect
@@ -98,7 +98,7 @@ dms ipc call plugins reload phoneConnect
 | LocalTranslate | `1.6.1` | 构建后的 `translate-lookup` 和随仓库提供的 SQLite 词典；SQLite 是保存词条及查询索引的本地数据库 |
 | LocalLyrics | `1.6.1` | 构建后的 `lyrics-helper` 和 FFmpeg 的 `ffprobe`，后者负责读取音频标签 |
 | CachyosAgents | `1.5.3` | `jq`、`python3`，以及 CachyOS 安装器提供的本机用量采集程序；详见插件 README |
-| PhoneConnect | `1.5.3` | 构建后的 `phone-connect`、`adb`、`scrcpy`、`avahi-browse`，以及运行中的 `avahi-daemon` |
+| 连接（PhoneConnect） | `1.5.3` | 构建后的 `phone-connect`；手机需要 `adb`、`scrcpy`、`avahi-browse` 和 `avahi-daemon`；电脑 RDP 需要 `xfreerdp3`，密码自动保存需要 `secret-tool` 和系统密钥环 |
 | Focus | `1.6.2` | 构建后的 `focus-helper`、`niri` 和 `dms`；当前按 niri `26.04` 的接口实现 |
 | Top | `1.6.1` | 构建后的 `top-helper`；面板不依赖合成器背景模糊 |
 
