@@ -9,7 +9,11 @@ PluginComponent {
     popoutWidth: Math.min(480, (parentScreen ? parentScreen.width : 960) - 48)
 
     PhoneSource { id: phone }
-    ComputerSource { id: computerSource }
+    ComputerSource {
+        id: computerSource
+        settings: root.pluginData
+        saveSetting: (key, value) => root.pluginService ? root.pluginService.savePluginData(root.pluginId, key, value) : false
+    }
     property bool dragActive: false
     function toLocalPaths(urls) {
         const list = [];

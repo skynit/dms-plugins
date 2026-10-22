@@ -177,13 +177,78 @@ Item {
 
         RowLayout {
             Layout.fillWidth: true
+            spacing: 8
             DankIcon { name: "devices"; size: 22; color: Theme.primary }
             StyledText {
                 text: root.mode === "files" ? "手机文件" : (root.mode === "settings" ? "投屏选项" : "连接")
                 font.pixelSize: 16
                 font.weight: Font.DemiBold
-                Layout.fillWidth: true
+                Layout.maximumWidth: 80
+                elide: Text.ElideRight
             }
+            Rectangle {
+                Layout.preferredWidth: 136
+                Layout.preferredHeight: 28
+                radius: 6
+                color: Theme.surfaceContainerHigh
+                border.width: 1
+                border.color: Theme.outlineMedium
+                Row {
+                    anchors.fill: parent
+                    anchors.margins: 2
+                    Repeater {
+                        id: deviceTabs
+                        model: ["手机", "电脑"]
+                        delegate: Rectangle {
+                            id: deviceTab
+                            required property int index
+                            required property string modelData
+                            readonly property bool selected: (root.mode === "computer") === (index === 1)
+                            width: 66
+                            height: 24
+                            radius: 4
+                            color: selected ? Qt.alpha(Theme.primary, 0.14) : "transparent"
+                            border.width: activeFocus ? 2 : 0
+                            border.color: Theme.primary
+                            activeFocusOnTab: true
+                            Accessible.role: Accessible.Button
+                            Accessible.name: modelData + "连接"
+                            Accessible.checkable: true
+                            Accessible.checked: selected
+                            Accessible.onPressAction: activate()
+                            function activate() { root.mode = index === 1 ? "computer" : "connect"; }
+                            Keys.onSpacePressed: activate()
+                            Keys.onReturnPressed: activate()
+                            Keys.onEnterPressed: activate()
+                            Keys.onLeftPressed: { root.mode = "connect"; deviceTabs.itemAt(0).forceActiveFocus(); }
+                            Keys.onRightPressed: { root.mode = "computer"; deviceTabs.itemAt(1).forceActiveFocus(); }
+                            Row {
+                                anchors.centerIn: parent
+                                spacing: 4
+                                DankIcon {
+                                    name: deviceTab.index === 1 ? "desktop_windows" : "smartphone"
+                                    size: 14
+                                    color: deviceTab.selected ? Theme.primary : Theme.surfaceVariantText
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                                StyledText {
+                                    text: deviceTab.modelData
+                                    font.pixelSize: 12
+                                    font.weight: deviceTab.selected ? Font.DemiBold : Font.Medium
+                                    color: deviceTab.selected ? Theme.primary : Theme.surfaceVariantText
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: deviceTab.activate()
+                            }
+                        }
+                    }
+                }
+            }
+            Item { Layout.fillWidth: true }
             DankActionButton {
                 visible: root.mode !== "computer"
                 iconName: root.mode === "files" ? "arrow_back" : "folder_open"
@@ -202,29 +267,6 @@ Item {
                 onClicked: root.mode = root.mode === "settings" ? "connect" : "settings"
             }
             DankActionButton { iconName: "close"; tooltipText: "关闭"; onClicked: if (root.closePopout) root.closePopout() }
-        }
-
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 8
-            DankButton {
-                Layout.fillWidth: true
-                text: "手机"
-                iconName: "smartphone"
-                buttonHeight: 36
-                backgroundColor: root.mode !== "computer" ? Theme.primary : Theme.surfaceContainerHigh
-                textColor: root.mode !== "computer" ? Theme.primaryText : Theme.surfaceText
-                onClicked: root.mode = "connect"
-            }
-            DankButton {
-                Layout.fillWidth: true
-                text: "电脑"
-                iconName: "desktop_windows"
-                buttonHeight: 36
-                backgroundColor: root.mode === "computer" ? Theme.primary : Theme.surfaceContainerHigh
-                textColor: root.mode === "computer" ? Theme.primaryText : Theme.surfaceText
-                onClicked: root.mode = "computer"
-            }
         }
 
         ComputerConnect {
